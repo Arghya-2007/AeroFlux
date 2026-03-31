@@ -1,11 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const BACKEND_URL = process.env.BACKEND_API_URL || 'http://localhost:3001/api/v1';
+import { verifyToken, generateToken } from '@/lib/csrf';
 
 async function handler(req: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  const BACKEND_URL = process.env.BACKEND_API_URL || 'http://127.0.0.1:3001/api/v1';
   const { path } = await context.params;
   const pathStr = path.join('/');
   
+  // Verify CSRF before forwarding (Node.js runtime safe)
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const csrfCookie = req.cookies.get('csrfToken')?.value;
+    const csrfHeader = req.headers.get('X-CSRF-Token');
+    
+    if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
+      return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
+    }
+    
+    const [token, sig] = csrfCookie.split('.');
+    if (!token || !sig || !(await verifyToken(token, sig))) {
+      return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
+    }
+  }
+
   // Forward search params
   const searchParams = req.nextUrl.searchParams.toString();
   const url = `${BACKEND_URL}/${pathStr}${searchParams ? `?${searchParams}` : ''}`;
@@ -30,12 +45,19 @@ async function handler(req: NextRequest, context: { params: Promise<{ path: stri
     }
   }
 
+  // Remove CSRF token header before forwarding to backend
+  headers.delete('x-csrf-token');
+  // Delete headers that might interfere with proxying
+  headers.delete('content-length');
+  headers.delete('connection');
+  headers.delete('transfer-encoding');
+
   const backendReq = new Request(url, {
     method: req.method,
     headers,
     body: body || undefined,
     redirect: 'manual',
-    duplex: 'half'
+    ...({ duplex: 'half' } as any)
   });
 
   try {
@@ -111,4 +133,3 @@ export {
   handler as DELETE,
   handler as OPTIONS,
 }
-

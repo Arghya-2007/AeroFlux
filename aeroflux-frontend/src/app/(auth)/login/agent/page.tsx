@@ -13,47 +13,52 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [userType, setUserType] = useState<'agent' | 'agency' | 'agency_agent'>('agent');
   
   // State for MFA
   const [isMfaStep, setIsMfaStep] = useState(false);
-  const [mfaToken, setMfaToken] = useState('');
   const [mfaCode, setMfaCode] = useState('');
+  
+  // State for Captcha
+  const [captchaRequired, setCaptchaRequired] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isMfaStep && captchaRequired && !captchaToken) {
+      setError('Please complete the captcha');
+      return;
+    }
     setError('');
     setIsLoading(true);
 
     try {
       if (isMfaStep) {
-        const data = await authService.verifyMfa(mfaToken, mfaCode);
+        const data = await authService.verifyMfaLogin(mfaCode);
         localStorage.setItem('access_token', data.access_token || data.accessToken);
-        router.push('/dashboard');
+        router.push('/agent');
         return;
       }
 
-      let data;
-      if (userType === 'agency') {
-        data = await authService.loginAgency({
-          agencyAdminEmail: email,
-          agencyAdminPassword: password,
-        });
-      } else if (userType === 'agency_agent') {
-        data = await authService.loginAgencyAgent({ email, password });
-      } else {
-        data = await authService.loginAgent({ email, password });
-      }
+      const data = await authService.loginAgent({ 
+        email, 
+        password,
+        captchaToken: captchaRequired ? captchaToken : undefined
+      });
 
-      if (data.mfa_token) {
-        setMfaToken(data.mfa_token);
+      if (data.mfaPending) {
         setIsMfaStep(true);
       } else {
         localStorage.setItem('access_token', data.access_token || data.accessToken);
-        router.push('/dashboard');
+        router.push('/agent');
       }
     } catch (err: any) {
-      setError(err.response?.data?.message || err.message || 'Login failed');
+      const msg = err.response?.data?.message || err.message || 'Login failed';
+      if (msg === 'CAPTCHA_REQUIRED') {
+        setCaptchaRequired(true);
+        setError('Too many failed attempts. Please solve the captcha to continue.');
+      } else {
+        setError(msg);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -63,47 +68,9 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-gray-50 p-4">
       <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden p-8">
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">Welcome Back</h1>
-          <p className="text-gray-500 text-sm">Please sign in to your account</p>
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Agent Login</h1>
+          <p className="text-gray-500 text-sm">Please sign in to your agent account</p>
         </div>
-
-        {!isMfaStep && (
-        <div className="flex bg-gray-100 p-1 rounded-lg mb-6">
-          <button
-            type="button"
-            className={`flex-1 text-sm py-2 rounded-md transition-all font-medium ${
-              userType === 'agent' 
-                ? 'bg-white text-gray-900 shadow-sm' 
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
-            onClick={() => setUserType('agent')}
-          >
-            Agent
-          </button>
-          <button
-            type="button"
-            className={`flex-1 text-sm py-2 rounded-md transition-all font-medium ${
-              userType === 'agency' 
-                ? 'bg-white text-gray-900 shadow-sm' 
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
-            onClick={() => setUserType('agency')}
-          >
-            Agency
-          </button>
-          <button
-            type="button"
-            className={`flex-1 text-sm py-2 rounded-md transition-all font-medium ${
-              userType === 'agency_agent' 
-                ? 'bg-white text-gray-900 shadow-sm' 
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
-            onClick={() => setUserType('agency_agent')}
-          >
-            Staff
-          </button>
-        </div>
-        )}
 
         {error && (
           <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm mb-6">
@@ -124,14 +91,12 @@ export default function LoginPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-                  placeholder="you@example.com"
+                  placeholder="agent@example.com"
                 />
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-medium text-gray-700">Password</label>
-                </div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
                 <input
                   type="password"
                   required
@@ -141,6 +106,20 @@ export default function LoginPage() {
                   placeholder="••••••••"
                 />
               </div>
+
+              {captchaRequired && (
+                <div className="mt-4 p-4 border rounded-lg bg-gray-50 flex flex-col items-center">
+                  <span className="text-sm text-gray-600 mb-2">Security Check Required</span>
+                  <input
+                    type="text"
+                    placeholder="Enter mock captcha token (e.g., bypass)"
+                    value={captchaToken}
+                    onChange={(e) => setCaptchaToken(e.target.value)}
+                    className="w-full px-3 py-2 border text-sm rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                    required
+                  />
+                </div>
+              )}
             </>
           ) : (
             <div>
@@ -170,7 +149,7 @@ export default function LoginPage() {
         {!isMfaStep && (
           <p className="text-center text-sm text-gray-500 mt-6">
             Don't have an account?{' '}
-            <Link href="/register" className="font-semibold text-blue-600 hover:text-blue-500">
+            <Link href="/register/agent" className="font-semibold text-blue-600 hover:text-blue-500">
               Sign up
             </Link>
           </p>

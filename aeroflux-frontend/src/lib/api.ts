@@ -1,20 +1,23 @@
 import axios from 'axios';
 
 export const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001',
+  baseURL: '/api/proxy',
+  withCredentials: true, // Send cookies to the Next.js proxy
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// Optional: Add request interceptor to add authorization headers later
+// Attach CSRF token from cookie to every mutating request
 api.interceptors.request.use(
   (config) => {
-    // If running in browser and token exists, add it
-    if (typeof window !== 'undefined') {
-      const token = localStorage.getItem('access_token');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
+    if (typeof document !== 'undefined') {
+      const csrfToken = document.cookie
+        .split('; ')
+        .find((row) => row.startsWith('csrfToken='))
+        ?.split('=')[1];
+      if (csrfToken) {
+        config.headers.set('X-CSRF-Token', csrfToken);
       }
     }
     return config;
@@ -32,4 +35,3 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
-

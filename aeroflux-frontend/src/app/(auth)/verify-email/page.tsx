@@ -19,7 +19,7 @@ function VerifyEmailContent() {
             return;
         }
 
-        api.get(`/auth/verify-email?token=${token}&type=${type}`)
+        api.post('/auth/verify-email', { token, type })
             .then(() => setStatus('success'))
             .catch(() => setStatus('error'));
     }, [token, type]);

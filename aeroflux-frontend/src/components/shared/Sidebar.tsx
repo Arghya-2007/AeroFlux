@@ -8,17 +8,17 @@ export default function Sidebar() {
         <ul className="space-y-2 px-4">
           <li>
             <a href="/" className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-gray-700/50 transition-colors">
-              <span className="material-icons text-[var(--primary)]">Dashboard</span>
+              <span className="material-icons text-(--primary)">Dashboard</span>
             </a>
           </li>
           <li>
             <a href="/bookings" className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-gray-700/50 transition-colors">
-              <span className="material-icons text-[var(--primary)]">Bookings</span>
+              <span className="material-icons text-(--primary)">Bookings</span>
             </a>
           </li>
           <li>
             <a href="/travelers" className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-gray-700/50 transition-colors">
-              <span className="material-icons text-[var(--primary)]">Travelers</span>
+              <span className="material-icons text-(--primary)">Travelers</span>
             </a>
           </li>
         </ul>

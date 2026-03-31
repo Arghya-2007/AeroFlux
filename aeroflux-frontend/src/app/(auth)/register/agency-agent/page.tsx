@@ -18,17 +18,41 @@ export default function RegisterAgencyAgentPage() {
     agencySecret: '',
   });
 
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (formData.password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+    if (!passwordRegex.test(formData.password)) {
+      setError('Password must contain at least 8 characters, including uppercase, lowercase, number and special character');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
       await authService.registerAgencyAgent(formData);
-      router.push('/login/agency-agent');
+      setSuccessMsg('Registration successful! Please check your email to verify your account.');
+      setFormData({
+        name: '',
+        email: '',
+        phone: '',
+        password: '',
+        role: 'AGENT',
+        agencyPublicId: '',
+        agencySecret: '',
+      });
+      setConfirmPassword('');
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Registration failed');
     } finally {
@@ -47,6 +71,12 @@ export default function RegisterAgencyAgentPage() {
           <h1 className="text-2xl font-bold text-gray-900 mb-2">Register Agency Staff</h1>
           <p className="text-gray-500 text-sm">Join an existing agency as staff</p>
         </div>
+
+        {successMsg && (
+          <div className="bg-green-50 text-green-700 p-4 rounded-lg text-sm mb-6 border border-green-200">
+            {successMsg}
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm mb-6">
@@ -104,6 +134,19 @@ export default function RegisterAgencyAgentPage() {
                   minLength={8}
                   value={formData.password}
                   onChange={handleChange}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Confirm Password *</label>
+                <input
+                  type="password"
+                  name="confirmPassword"
+                  required
+                  minLength={8}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                 />
               </div>

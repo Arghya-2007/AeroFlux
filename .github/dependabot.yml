@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/aeroflux-backend"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/aeroflux-frontend"
+    schedule:
+      interval: "weekly"
