@@ -1,0 +1,509 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+//  ENUMS — new ones added for the 3 new tables
+// ─────────────────────────────────────────────
+
+enum AgencyPlan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum AgentRole {
+  ADMIN
+  AGENT
+}
+
+enum PackageStatus {
+  DRAFT
+  PROCESSING
+  NEEDS_REVIEW
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+enum DocumentStatus {
+  UPLOADED
+  QUEUED
+  TIER1_PROCESSING
+  TIER2_PROCESSING
+  EXTRACTED
+  NEEDS_REVIEW
+  APPROVED
+  FAILED
+}
+
+enum DocumentType {
+  PDF
+  SCREENSHOT
+  EMAIL_EXPORT
+  WHATSAPP_EXPORT
+  OTHER
+}
+
+enum ProcessingTier {
+  TIER1
+  TIER2
+  MANUAL
+}
+
+// ── NEW ──────────────────────────────────────
+
+enum BookingType {
+  FLIGHT
+  HOTEL
+  TRAIN
+  BUS
+  TAXI
+  FERRY
+  ACTIVITY // entry tickets, guided tours, experiences
+  OTHER
+}
+
+enum BookingStatus {
+  CONFIRMED
+  PENDING
+  WAITLISTED // common for Indian railways (WL → RAC → CNF)
+  CANCELLED
+}
+
+enum ItineraryDayStatus {
+  UPCOMING
+  IN_PROGRESS // today's date matches this day
+  COMPLETED
+}
+
+enum SubscriptionPlan {
+  FREE // 5 active packages, 10 docs/month
+  PRO // 50 packages, 200 docs/month, white-label
+  ENTERPRISE // unlimited, custom domain, priority support
+}
+
+enum SubscriptionStatus {
+  TRIALING // 14-day trial, no card required
+  ACTIVE
+  PAST_DUE // payment failed, grace period (3 days)
+  CANCELLED // cancelled but active until period ends
+  EXPIRED // period ended, access blocked
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL // typically 2 months free
+}
+
+enum AuthEventType {
+  REGISTER_SUCCESS
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGIN_BLOCKED_CAPTCHA
+  LOGIN_BLOCKED_IP
+  LOGOUT
+  TOKEN_REFRESHED
+  TOKEN_REPLAY_DETECTED // triggers revokeAllUserSessions
+  TOKEN_REUSE_DETECTED
+  PASSWORD_CHANGED
+  PASSWORD_RESET_REQUESTED
+  EMAIL_CHANGE_REQUESTED
+  EMAIL_CHANGE_CONFIRMED
+  EMAIL_VERIFIED
+  MFA_ENABLED
+  MFA_DISABLED
+  MFA_SUCCESS
+  MFA_FAILED
+  MFA_FAILURE
+  MFA_LOCKOUT
+  IMPOSSIBLE_TRAVEL_FLAGGED
+  IMPOSSIBLE_TRAVEL_DETECTED
+  CAPTCHA_REQUIRED
+  SESSION_REVOKED_ALL
+  ACCOUNT_UNLOCKED
+  UNKNOWN_ACTION // safe sentinel for unrecognized audit actions
+}
+
+model AuthEvent {
+  id        String        @id @default(cuid())
+  agentId   String? // null for failed logins where agent doesn't exist yet
+  type      AuthEventType
+  ipHash    String? // HMAC-hashed IP — never raw
+  userAgent String?
+  country   String? // from IP geolocation
+  city      String?
+  metadata  Json? // { reason, tokenFamily, attemptCount, ... }
+  createdAt DateTime      @default(now())
+
+  agent Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([agentId])
+  @@index([agentId, type]) // "show all failed logins for this agent"
+  @@index([type, createdAt]) // "all IMPOSSIBLE_TRAVEL events this week"
+  @@index([createdAt]) // time-series queries, prune old events
+}
+
+// ─────────────────────────────────────────────
+//  AGENCY  (unchanged — just plan enum expanded)
+// ─────────────────────────────────────────────
+
+model Agency {
+  id                      String  @id @default(cuid())
+  agencyName              String
+  agencyAddress           String?
+  agencySlug              String  @unique
+  supportEmail            String  @unique
+  supportPhone            String?
+  agencyAdminName         String
+  agencyAdminEmail        String  @unique
+  agencyAdminPasswordHash String
+  logoUrl                 String?
+  agencyPublicId          String  @unique @default(cuid())
+  agencySecretHash        String  @unique
+
+  isEmailVerified        Boolean @default(false)
+  emailVerificationToken String? @unique
+
+  // MFA added
+  mfaSecret        String?
+  mfaRecoveryCodes String[]
+  isMfaEnabled     Boolean  @default(false)
+
+  plan      AgencyPlan @default(FREE)
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  subscription Subscription? // ← NEW: 1-to-1
+  agencyAgents AgencyAgent[]
+  tourPackages TourPackage[]
+
+  @@index([agencySlug])
+  @@index([isActive])
+}
+
+// ─────────────────────────────────────────────
+//  SUBSCRIPTION  ← NEW TABLE
+//
+//  One subscription per agency (1-to-1).
+//  Stripe IDs stored here — never stored on Agency
+//  so billing concerns stay in one place.
+//
+//  State machine:
+//  TRIALING → ACTIVE → PAST_DUE → EXPIRED
+//                    ↘ CANCELLED
+// ─────────────────────────────────────────────
+
+model Subscription {
+  id           String             @id @default(cuid())
+  agencyId     String             @unique // 1-to-1 with Agency
+  plan         SubscriptionPlan   @default(FREE)
+  status       SubscriptionStatus @default(TRIALING)
+  billingCycle BillingCycle       @default(MONTHLY)
+
+  // Billing period — updated by Stripe webhook on renewal
+  currentPeriodStart DateTime @default(now())
+  currentPeriodEnd   DateTime
+
+  // Trial — null once converted to paid
+  trialEndsAt DateTime?
+
+  // Stripe references — null for FREE plan
+  stripeCustomerId     String? @unique
+  stripeSubscriptionId String? @unique
+  stripePriceId        String? // which Stripe price object is active
+
+  // Usage counters — reset on period renewal via cron
+  // Checked before allowing new package creation / doc upload
+  activePackagesCount Int @default(0)
+  docsProcessedCount  Int @default(0)
+
+  cancelledAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@index([status])
+  @@index([stripeCustomerId]) // Stripe webhook lookup
+  @@index([stripeSubscriptionId]) // Stripe webhook lookup
+  @@index([currentPeriodEnd]) // cron: find subscriptions expiring soon
+}
+
+// ─────────────────────────────────────────────
+// AGENCY AGENT  (unchanged)
+// ─────────────────────────────────────────────
+
+model AgencyAgent {
+  id            String  @id @default(cuid())
+  agencyId      String
+  name          String
+  email         String  @unique
+  phone         String?
+  passwordHash  String
+  profileImgUrl String?
+
+  isEmailVerified        Boolean @default(false)
+  emailVerificationToken String? @unique
+
+  // MFA added
+  mfaSecret        String?
+  mfaRecoveryCodes String[]
+  isMfaEnabled     Boolean  @default(false)
+
+  role        AgentRole @default(AGENT)
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@index([email])
+  @@index([agencyId, isActive])
+  @@index([agencyId, role])
+}
+
+// ─────────────────────────────────────────────
+// AGENT  (unchanged)
+// ─────────────────────────────────────────────
+
+model Agent {
+  id            String  @id @default(cuid())
+  name          String
+  email         String  @unique
+  phone         String?
+  address       String?
+  passwordHash  String
+  profileImgUrl String?
+
+  isEmailVerified        Boolean @default(false)
+  emailVerificationToken String? @unique
+
+  // MFA added
+  mfaSecret        String?
+  mfaRecoveryCodes String[]
+  isMfaEnabled     Boolean  @default(false)
+
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  tourPackages TourPackage[] @relation("CreatedByAgent")
+  documents    Document[]
+  authEvents   AuthEvent[]
+
+  @@index([email])
+}
+
+// ─────────────────────────────────────────────
+//  TOUR PACKAGE  (extractedData removed —
+//  booking data now lives in BookingDetail,
+//  itinerary lives in TourItinerary)
+// ─────────────────────────────────────────────
+
+model TourPackage {
+  id               String        @id @default(cuid())
+  agencyId         String
+  createdByAgentId String
+  title            String
+  slug             String        @unique
+  trackingToken    String        @unique @default(cuid())
+  status           PackageStatus @default(DRAFT)
+  destination      String
+  startDate        DateTime
+  endDate          DateTime
+  totalTravelers   Int           @default(0)
+  totalDays        Int           @default(0) // ← NEW: derived from itinerary count
+
+  // Keep a small Json for misc AI-extracted fields that don't
+  // fit a typed table yet (e.g. visa notes, special requests).
+  // Everything important gets promoted to a real column/table.
+  miscData Json?
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  agency         Agency          @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  createdByAgent Agent           @relation("CreatedByAgent", fields: [createdByAgentId], references: [id])
+  travelers      Traveler[]
+  documents      Document[]
+  itinerary      TourItinerary[] // ← NEW
+  bookings       BookingDetail[] // ← NEW
+
+  @@index([agencyId])
+  @@index([createdByAgentId])
+  @@index([status])
+  @@index([trackingToken])
+  @@index([agencyId, status])
+  @@index([startDate, endDate])
+}
+
+// ─────────────────────────────────────────────
+//  TOUR ITINERARY  ← NEW TABLE
+//
+//  One row per day of the tour.
+//  dayNumber is 1-indexed (Day 1, Day 2…).
+//  activities is a Json array — avoids an extra
+//  table for V1 while still being queryable.
+//
+//  activities shape:
+//  [{ time: "09:00", title: "...", location: "...",
+//     durationMinutes: 120, notes: "..." }]
+//
+//  meals is a comma-separated flag string for
+//  simplicity: "BREAKFAST,LUNCH" — easy to render
+//  as pills without a separate MealType table.
+// ─────────────────────────────────────────────
+
+model TourItinerary {
+  id            String             @id @default(cuid())
+  tourPackageId String
+  dayNumber     Int // 1, 2, 3 …
+  date          DateTime? // nullable: not all packages have fixed dates at creation
+  title         String // "Arrival in Kochi & Fort Kochi walk"
+  description   String? // longer summary shown on tracking page
+  activities    Json               @default("[]")
+  accommodation String? // hotel name for that night
+  meals         String? // "BREAKFAST,DINNER" — parsed as String[] in app layer
+  status        ItineraryDayStatus @default(UPCOMING)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  tourPackage TourPackage @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+
+  @@unique([tourPackageId, dayNumber]) // no two rows for the same day on the same package
+  @@index([tourPackageId])
+  @@index([tourPackageId, status]) // tracking page: "what day is IN_PROGRESS right now?"
+  @@index([date]) // cron: auto-flip UPCOMING → IN_PROGRESS each morning
+}
+
+// ─────────────────────────────────────────────
+//  BOOKING DETAIL  ← NEW TABLE
+//
+//  One row per booking item extracted from docs.
+//  Examples: one flight, one hotel stay, one train.
+//
+//  travelerId is NULLABLE — a hotel booking covers
+//  all travelers; a seat booking is per-traveler.
+//
+//  documentId links back to the source document
+//  so agents can trace "which PDF did this come from?"
+//
+//  rawData stores type-specific extra fields:
+//  FLIGHT  → { airline, terminal, class, baggage }
+//  HOTEL   → { roomType, checkInTime, checkOutTime }
+//  TRAIN   → { trainNo, coachType, berth, quota }
+//  TAXI    → { vehicleType, driverPhone, pickupNote }
+// ─────────────────────────────────────────────
+
+model BookingDetail {
+  id            String  @id @default(cuid())
+  tourPackageId String
+  travelerId    String? // null = applies to whole group
+  documentId    String? // null = entered manually (Tier 3)
+
+  type           BookingType
+  status         BookingStatus @default(CONFIRMED)
+  providerName   String // "IndiGo", "Taj Hotels", "IRCTC"
+  confirmationNo String? // hotel voucher number, activity ticket ID
+  pnr            String? // flight / train PNR — indexed separately
+
+  // Departure / check-in
+  startDateTime DateTime?
+  fromLocation  String? // airport code, station name, pickup address
+
+  // Arrival / check-out
+  endDateTime DateTime?
+  toLocation  String?
+
+  // Seat / coach / room — single field, value depends on type
+  // FLIGHT: "24A", TRAIN: "S4-62", HOTEL: "304", BUS: "12"
+  seatCoachRoom String?
+
+  // Extra type-specific fields — see comment above
+  rawData Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tourPackage TourPackage @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+  traveler    Traveler?   @relation(fields: [travelerId], references: [id], onDelete: SetNull)
+  document    Document?   @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([tourPackageId])
+  @@index([travelerId])
+  @@index([tourPackageId, type]) // tracking page: "get all FLIGHTs for this package"
+  @@index([tourPackageId, status]) // dashboard: "any CANCELLED bookings on this tour?"
+  @@index([pnr]) // disruption monitor: lookup by PNR to check live status
+  @@index([startDateTime]) // cron: "bookings starting in the next 24 hours"
+}
+
+// ─────────────────────────────────────────────
+//  TRAVELER  (add relation to BookingDetail)
+// ─────────────────────────────────────────────
+
+model Traveler {
+  id             String   @id @default(cuid())
+  tourPackageId  String
+  name           String
+  phone          String?
+  email          String?
+  seatNumber     String?
+  roomNumber     String?
+  mealPreference String?
+  trackingToken  String   @unique @default(cuid())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tourPackage TourPackage     @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+  bookings    BookingDetail[] // ← NEW: traveler's specific bookings
+
+  @@index([tourPackageId])
+  @@index([phone])
+  @@index([trackingToken])
+}
+
+// ─────────────────────────────────────────────
+//  DOCUMENT  (add relation to BookingDetail)
+// ─────────────────────────────────────────────
+
+model Document {
+  id                String          @id @default(cuid())
+  tourPackageId     String
+  uploadedByAgentId String
+  type              DocumentType
+  originalName      String
+  mimeType          String
+  s3Key             String          @unique
+  s3Url             String
+  fileSizeBytes     Int
+  status            DocumentStatus  @default(UPLOADED)
+  processingTier    ProcessingTier?
+  extractedData     Json?
+  processingError   String?
+  retryCount        Int             @default(0)
+  processedAt       DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  tourPackage     TourPackage     @relation(fields: [tourPackageId], references: [id], onDelete: Cascade)
+  uploadedByAgent Agent           @relation(fields: [uploadedByAgentId], references: [id])
+  bookings        BookingDetail[] // ← NEW: bookings extracted from this doc
+
+  @@index([tourPackageId])
+  @@index([uploadedByAgentId])
+  @@index([status])
+  @@index([tourPackageId, status])
+}
