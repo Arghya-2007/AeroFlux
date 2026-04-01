@@ -24,6 +24,8 @@ services:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/aero-flux?schema=public
       - REDIS_URL=redis://redis:6379
       - PORT=3000
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - NODE_ENV=${NODE_ENV:-development}
     volumes:
       - ./aeroflux-backend:/app
     ports:
