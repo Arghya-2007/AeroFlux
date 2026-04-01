@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
+import { SentryModule, SentryGlobalFilter } from '@sentry/nestjs/setup';
 import * as Joi from 'joi';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -14,9 +15,12 @@ import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis'
 
 @Module({
   imports: [
+    // Sentry must be registered before all other modules to capture errors globally
+    SentryModule.forRoot(),
     ConfigModule.forRoot({
       isGlobal: true,
       validationSchema: Joi.object({
+        SENTRY_DSN: Joi.string().uri().optional(),
         RESEND_API_KEY: Joi.string().min(10).required(),
         EMAIL_TOKEN_SECRET: Joi.string().min(32).required(),
         JWT_ACCESS_SECRET: Joi.string().min(32).required(),
@@ -47,6 +51,11 @@ import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis'
   providers: [
     AppService,
     PrismaService,
+    {
+      // SentryGlobalFilter captures all unhandled exceptions and reports them to Sentry
+      provide: APP_FILTER,
+      useClass: SentryGlobalFilter,
+    },
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard, // Applies rate limiting to all routes globally

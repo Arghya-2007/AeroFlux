@@ -1,3 +1,6 @@
+// Sentry must be imported before everything else
+import './instrument';
+
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ZodValidationPipe } from 'nestjs-zod';
