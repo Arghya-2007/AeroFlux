@@ -51,7 +51,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 
 # Generate Prisma client for production if schema exists
-RUN if [ -d "prisma" ]; then pnpm dlx prisma generate; fi
+RUN if [ -d "prisma" ]; then pnpm dlx prisma@5.22.0 generate; fi
 
 # Expose port (Railway typically provides the PORT env var dynamically, but 3000 is a common default)
 EXPOSE 3000
