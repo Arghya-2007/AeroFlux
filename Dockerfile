@@ -19,7 +19,7 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 
 # Generate Prisma client if schema exists
-RUN if [ -d "prisma" ]; then pnpm dlx prisma generate; fi
+RUN if [ -d "prisma" ]; then pnpm dlx prisma@5.22.0 generate; fi
 
 # Build the NestJS application
 RUN pnpm run build
