@@ -1,0 +1,343 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+}
+
+enum FeeStatus {
+  PENDING
+  PAID
+  OVERDUE
+  WAIVED
+}
+
+enum PaymentMode {
+  CASH
+  UPI
+  BANK_TRANSFER
+  ONLINE
+}
+
+enum NotificationChannel {
+  WHATSAPP
+  EMAIL
+  FCM
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  DELIVERED
+}
+
+enum NoticeAudience {
+  ALL_STUDENTS
+  PARENTS_ONLY
+  STUDENTS_ONLY
+}
+
+enum DayOfWeek {
+  MON
+  TUE
+  WED
+  THU
+  FRI
+  SAT
+  SUN
+}
+
+// =============================================================================
+// TEACHER
+// The platform user. Owns all downstream data.
+// Auth is handled by Supabase — supabaseUid links to Supabase auth.users.id
+// =============================================================================
+
+model Teacher {
+  id          String    @id @default(cuid())
+  supabaseUid String    @unique // FK to Supabase auth.users.id
+  name        String
+  phone       String    @unique // E.164 format
+  email       String?   @unique
+  profileImg  String? // Supabase Storage URL
+  fcmToken    String? // Latest FCM device token
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime? // Soft delete
+
+  batches Batch[]
+  notices Notice[]
+
+  @@index([supabaseUid])
+  @@index([phone])
+  @@index([deletedAt])
+  @@map("teachers")
+}
+
+// =============================================================================
+// BATCH
+// A class/group run by a teacher. E.g. "Class 10 Maths — Morning"
+// Fee amount stored in paise. 50000 paise = ₹500/month
+// =============================================================================
+
+model Batch {
+  id               String      @id @default(cuid())
+  teacherId        String
+  name             String // "Class 10 Physics"
+  subject          String?
+  description      String?
+  monthlyFeesPaise Int // Fee in paise. Avoids float errors.
+  scheduleDays     DayOfWeek[] // e.g. [MON, WED, FRI]
+  startTime        String? // "09:00" — stored as HH:mm string
+  endTime          String? // "10:30"
+  maxStudents      Int? // Optional capacity cap
+  isActive         Boolean     @default(true)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  deletedAt        DateTime?
+
+  teacher            Teacher             @relation(fields: [teacherId], references: [id])
+  batchStudents      BatchStudent[]
+  attendanceSessions AttendanceSession[]
+  feeRecords         FeeRecord[]
+  notices            Notice[]
+
+  // Query patterns: teacher's active batches, all batches for a teacher
+  @@index([teacherId, isActive])
+  @@index([teacherId, deletedAt])
+  @@map("batches")
+}
+
+// =============================================================================
+// STUDENT
+// A learner. Can be enrolled in multiple batches (even across teachers).
+// parentPhone is separate — absence alerts go ONLY to parentPhone.
+// =============================================================================
+
+model Student {
+  id          String    @id @default(cuid())
+  name        String
+  phone       String? // Student's own phone (optional — may be minor)
+  parentPhone String // E.164. Required. Absence alerts go here.
+  parentName  String?
+  email       String? // Optional. For invoice CC.
+  profileImg  String? // Supabase Storage URL
+  address     String?
+  dateOfBirth DateTime?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  batchStudents     BatchStudent[]
+  attendanceRecords AttendanceRecord[]
+  feeRecords        FeeRecord[]
+
+  // Query patterns: lookup by parent phone for WhatsApp delivery checks
+  @@index([parentPhone])
+  @@index([phone])
+  @@index([deletedAt])
+  @@map("students")
+}
+
+// =============================================================================
+// BATCH_STUDENT (Junction table)
+// Represents a student's enrollment in a specific batch.
+// enrolledAt and leftAt allow historical tracking.
+// =============================================================================
+
+model BatchStudent {
+  id          String    @id @default(cuid())
+  batchId     String
+  studentId   String
+  enrolledAt  DateTime  @default(now())
+  leftAt      DateTime? // NULL = currently enrolled
+  feeOverride Int? // Paise. If set, overrides batch.monthlyFeesPaise
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  batch   Batch   @relation(fields: [batchId], references: [id])
+  student Student @relation(fields: [studentId], references: [id])
+
+  // Unique: a student cannot be enrolled twice in the same batch at the same time
+  // (leftAt IS NULL means currently active)
+  @@unique([batchId, studentId, leftAt])
+  // Query patterns: all active students in a batch; all batches for a student
+  @@index([batchId, leftAt])
+  @@index([studentId, leftAt])
+  @@map("batch_students")
+}
+
+// =============================================================================
+// ATTENDANCE_SESSION
+// Represents one class session. Teacher starts a session per batch per day.
+// QR attendance: teacher shows QRToken; student scans to mark present.
+// QR token expires after the session ends.
+// =============================================================================
+
+model AttendanceSession {
+  id          String    @id @default(cuid())
+  batchId     String
+  sessionDate DateTime  @db.Date // Date only — no time component
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+  qrToken     String    @unique // Short-lived UUID for QR scanning
+  qrExpiresAt DateTime // Typically startedAt + 90 minutes
+  isFinalized Boolean   @default(false) // True = teacher has locked the session
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  batch             Batch              @relation(fields: [batchId], references: [id])
+  attendanceRecords AttendanceRecord[]
+
+  // One session per batch per date
+  @@unique([batchId, sessionDate])
+  // Query patterns: today's session for a batch; recent sessions for a batch
+  @@index([batchId, sessionDate])
+  @@index([qrToken]) // Fast QR scan lookup
+  @@index([qrExpiresAt]) // For expiry cleanup jobs
+  @@map("attendance_sessions")
+}
+
+// =============================================================================
+// ATTENDANCE_RECORD
+// One student's status in one session.
+// markedByQr: true if scanned, false if manually marked by teacher.
+// =============================================================================
+
+model AttendanceRecord {
+  id         String           @id @default(cuid())
+  sessionId  String
+  studentId  String
+  status     AttendanceStatus @default(PRESENT)
+  markedByQr Boolean          @default(false)
+  markedAt   DateTime         @default(now())
+  note       String? // e.g. "Left early"
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  session AttendanceSession @relation(fields: [sessionId], references: [id])
+  student Student           @relation(fields: [studentId], references: [id])
+
+  // One record per student per session
+  @@unique([sessionId, studentId])
+  // Query patterns: all absent students in a session (for alert dispatch)
+  @@index([sessionId, status])
+  @@index([studentId, markedAt])
+  @@map("attendance_records")
+}
+
+// =============================================================================
+// FEE_RECORD
+// One student's fee obligation for one month in one batch.
+// dueDateMonth: stored as first day of the month (2024-06-01 = June 2024).
+// amountPaise: copied from batch at time of record creation (batch fee may change later).
+// =============================================================================
+
+model FeeRecord {
+  id              String       @id @default(cuid())
+  batchId         String
+  studentId       String
+  dueDateMonth    DateTime     @db.Date // Always 1st of month. e.g. 2024-06-01
+  amountPaise     Int // Snapshot of fee at creation time
+  status          FeeStatus    @default(PENDING)
+  paidAt          DateTime?
+  paidAmountPaise Int? // Actual amount received
+  paymentMode     PaymentMode?
+  paymentRef      String? // UPI transaction ID, etc.
+  invoiceUrl      String? // Supabase Storage URL of PDF
+  invoiceSentAt   DateTime?
+  notes           String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  batch   Batch   @relation(fields: [batchId], references: [id])
+  student Student @relation(fields: [studentId], references: [id])
+
+  // One fee record per student per batch per month
+  @@unique([batchId, studentId, dueDateMonth])
+  // Query patterns: all pending fees for a batch; overdue fees for reminders;
+  // all fee records for a student
+  @@index([batchId, status])
+  @@index([batchId, dueDateMonth])
+  @@index([studentId, status])
+  @@index([status, dueDateMonth]) // For cron: find all overdue across platform
+  @@map("fee_records")
+}
+
+// =============================================================================
+// NOTICE
+// An urgent broadcast by a teacher targeting a batch.
+// Examples: "Exam tomorrow", "Holiday on Friday", "Class rescheduled"
+// =============================================================================
+
+model Notice {
+  id          String         @id @default(cuid())
+  teacherId   String
+  batchId     String? // NULL = broadcast to all teacher's batches
+  title       String
+  body        String
+  audience    NoticeAudience @default(ALL_STUDENTS)
+  scheduledAt DateTime? // NULL = send immediately
+  sentAt      DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  teacher Teacher @relation(fields: [teacherId], references: [id])
+  batch   Batch?  @relation(fields: [batchId], references: [id])
+
+  // Query patterns: all notices for a teacher; unsent scheduled notices (for cron)
+  @@index([teacherId, createdAt])
+  @@index([batchId, createdAt])
+  @@index([scheduledAt, sentAt]) // Cron picks up: scheduledAt <= NOW AND sentAt IS NULL
+  @@map("notices")
+}
+
+// =============================================================================
+// NOTIFICATION_LOG
+// Immutable audit trail of every outbound notification.
+// Never update rows. Only insert. Used for deduplication and delivery tracking.
+// entityType + entityId: polymorphic reference to what triggered this message.
+// e.g. entityType="FeeRecord", entityId="clxxxxx"
+// =============================================================================
+
+model NotificationLog {
+  id             String              @id @default(cuid())
+  channel        NotificationChannel
+  status         NotificationStatus  @default(QUEUED)
+  recipientPhone String? // For WHATSAPP channel
+  recipientEmail String? // For EMAIL channel
+  fcmToken       String? // For FCM channel
+  entityType     String // "FeeRecord" | "AttendanceRecord" | "Notice"
+  entityId       String // cuid of the triggering entity
+  templateId     String? // WhatsApp template ID used
+  messageBody    String? // Rendered message body (for EMAIL/FCM)
+  externalId     String? // Message ID from AiSency/Resend/FCM
+  errorMessage   String? // Populated on FAILED status
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime            @default(now())
+
+  // Query patterns: has this entity already been notified via this channel?
+  // (deduplication check before enqueuing)
+  @@index([entityType, entityId, channel])
+  @@index([channel, status, createdAt])
+  @@index([recipientPhone, createdAt])
+  @@map("notification_logs")
+}
